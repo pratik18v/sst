@@ -1,16 +1,17 @@
+import os
+import hickle
 import lasagne
 import numpy as np
 import theano
 import theano.tensor as T
-
 
 class SSTSequenceEncoder(object):
     """Class that encapsulates the sequence encoder and the output proposals
     stages of the SST (Single-Stream Temporal Action Proposals) model.
     """
     def __init__(self, input_var=None, target_var=None, seq_length=None, num_proposals=16,
-            depth=2, width=512, input_size=500, grad_clip=100, reset_bias=5.0,
-            dropout=0, verbose=False, **kwargs):
+            depth=1, width=256, input_size=500, grad_clip=100, reset_bias=5.0,
+            dropout=0, mode='train', w0=None, w1=None, verbose=False, **kwargs):
         """Initialize the model architecture. See Section 3 in the main paper
         for additional details.
 
@@ -46,8 +47,11 @@ class SSTSequenceEncoder(object):
         ValueError
             Invalid value for dropout or num_proposals
         """
+        self.mode = mode
         self.input_var = input_var
         self.target_var = target_var
+        self.w0 = w0
+        self.w1 = w1
         self.seq_length = seq_length
         self.num_proposals = num_proposals
         if num_proposals < 0.0:
@@ -65,7 +69,7 @@ class SSTSequenceEncoder(object):
         self.dropout = dropout
         self.verbose = verbose
         self.train_fn = None
-        self._model = None # retains compiled function (test_fn)
+        self.test_fn = None
         self._network = self._build_network() # retains theano symbolic graph
 
     def _build_network(self):
@@ -98,7 +102,7 @@ class SSTSequenceEncoder(object):
     def initialize_pretrained(self, model_params, **kwargs):
         """Initialize model parameters to pre-trained weights (model_params).
         """
-        if not callable(self._model):
+        if not callable(self.test_fn):
             lasagne.layers.set_all_param_values(self._network, model_params)
         elif self.verbose:
             print("Model is already compiled! Ignoring provided model_params.")
@@ -107,30 +111,39 @@ class SSTSequenceEncoder(object):
     def compile(self, **kwargs):
         """Compiles model for evaluation.
         """
-        if not callable(self._model):
-            #Train function
-            train_prediction = lasagne.layers.get_output(self._network)
-            loss = lasagne.objectives.binary_crossentropy(train_prediction.flatten(ndim=1),
-                    self.target_var.flatten(ndim=1))
-            loss = loss.mean()
-            params = lasagne.layers.get_all_params(self._network, trainable=True)
-            updates = lasagne.updates.nesterov_momentum(
+        if not callable(self.test_fn):
+            if self.mode == 'train':
+                #Train function
+                term1 = self.w1 * self.target_var
+                term2 = self.w0 * (1.0 - self.target_var)
+                train_prediction = T.clip(lasagne.layers.get_output(self._network), 0.001, 0.999)
+                #loss = lasagne.objectives.binary_crossentropy(train_prediction.ravel(), self.target_var.ravel())
+                loss = -(term1.ravel() * T.log(train_prediction.ravel()) + (1.0 - term2.ravel()) * T.log(1.0 - train_prediction.ravel()))
+                loss = loss.mean()
+                params = lasagne.layers.get_all_params(self._network, trainable=True)
+                updates = lasagne.updates.nesterov_momentum(
                         loss, params, learning_rate=0.01, momentum=0.9)
-            self.train_fn = theano.function([self.input_var, self.target_var], loss, updates=updates)
-
-            #Test function
-            test_prediction = lasagne.layers.get_output(self._network,
-                                                        deterministic=True)
-            test_loss = lasagne.objectives.binary_crossentropy(test_prediction.flatten(ndim=1),
-                                                        self.target_var.flatten(ndim=1))
-            test_loss = test_loss.mean()
-            test_fn = theano.function([self.input_var, self.target_var], test_loss)
-            self._model = test_fn
+                #updates = lasagne.updates.adam(loss, params, learning_rate = 0.05)
+                self.train_fn = theano.function([self.input_var, self.target_var], loss, updates=updates)
+                #Test function
+                test_prediction = T.clip(lasagne.layers.get_output(self._network,
+                                                        deterministic=True), 0.001, 0.999)
+                #test_loss = lasagne.objectives.binary_crossentropy(test_prediction.ravel(), self.target_var.ravel())
+                term1 = self.w1 * self.target_var
+                term2 = self.w0 * (1.0 - self.target_var)
+                test_loss = -(term1.ravel() * T.log(train_prediction.ravel()) + (1.0 - term2.ravel()) * T.log(1.0 - train_prediction.ravel()))
+                test_loss = test_loss.mean()
+                test_fn = theano.function([self.input_var, self.target_var], test_loss)
+            elif self.mode == 'test':
+                test_prediction = lasagne.layers.get_output(self._network,
+                    deterministic=True)
+                test_fn = theano.function([self.input_var], test_prediction)
+            self.test_fn = test_fn
         elif self.verbose:
             print("Model is already compiled - skipping compilation operation.")
         return self
 
-    def forward_eval(self, input_data, input_labels, mode='train'):
+    def forward_eval(self, input_data, input_labels=None):
         """ Performs forward pass to obtain predicted confidence scores over
         the discretized input video stream(s).
 
@@ -154,16 +167,30 @@ class SSTSequenceEncoder(object):
         ValueError
             If model has not been compiled or input data is malformed.
         """
-        if not callable(self._model) or not callable(self.train_fn):
+        if not callable(self.test_fn):
             raise ValueError("Model must be compiled.")
         if input_data.ndim != 3:
             raise ValueError("Input ndarray must be three dimensional.")
         if input_data.shape[2] != self.input_size:
             raise ValueError(("Mismatch between input visual encoding size and network input size."))
 
-        if mode == 'train':
+        if self.mode == 'train':
             output = self.train_fn(input_data, input_labels)
-        elif mode == 'test':
-            output = self._model(input_data, input_labels)
-
+            output = self.test_fn(input_data, input_labels)
+        elif self.mode == 'test':
+            output = self.test_fn(input_data)
         return output
+
+    def load_model_params(self, filename):
+        """Unpickles and loads parameters into a Lasagne model."""
+        with open(filename, 'r') as f:
+            data = hickle.load(f)
+            #data = data['params']
+        lasagne.layers.set_all_param_values(self._network, data)
+
+    def save_model_params(self, filename):
+        """Pickels the parameters within a Lasagne model."""
+        data = lasagne.layers.get_all_param_values(self._network)
+        filename = os.path.join('./', filename)
+        with open(filename, 'w') as f:
+            hickle.dump(data, f)

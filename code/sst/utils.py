@@ -29,6 +29,7 @@ def get_segments(y, delta=16):
         One-dimensional array of shape (num_props,), containing the
         corresponding scores for each detection above.
     """
+    stride = 16
     temp_props, temp_scores = [], []
     L, K = y.shape
     for i in range(L):
@@ -42,7 +43,7 @@ def get_segments(y, delta=16):
     return props, scores
 
 
-def nms_detections(props, scores, overlap=0.7):
+def nms_detections(props, scores, overlap=0.5):
     """Non-maximum suppression: Greedily select high-scoring detections and
     skip detections that are significantly covered by a previously selected
     detection. This version is translated from Matlab code by Tomasz
