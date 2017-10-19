@@ -1,9 +1,149 @@
+#!/usr/bin/env python2
+# -*- coding: utf-8 -*-
 """
-utils.py
---------
-This document contains utility functions for use with the SST model.
+Created on Sun Sep 24 03:34:43 2017
+
+@author: pratik18v
 """
+import os
+import argparse
 import numpy as np
+import pickle as pkl
+import hickle as hkl
+import scipy.io as sio
+from sklearn.decomposition import PCA
+
+def parse_args():
+    p = argparse.ArgumentParser(
+      description="Utility code to prepare dataset for training.",
+      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+
+    p.add_argument('-fd', '--feats-dir', help='C3D video features directory',
+            default='/nfs/bigeye/yangwang/DataSets/THUMOS14/src/extract_c3d/c3d_feat/', type=str)
+
+    p.add_argument('-pfd', '--pca-feats-dir', help='C3D video features with PCA directory',
+            default='/nfs/bigbang/pratik18v/cse599/sst/data/c3d_pca/', type=str)
+
+    p.add_argument('-sd', '--stats-data', help='Path to save stats for PCA (U and mean)',
+            default='/nfs/bigbang/pratik18v/cse599/sst/data/pca_c3d_relu6_thumos.pkl', type=str)
+
+    p.add_argument('-dd', '--data-dir', help='Directory storing all the data',
+            default='/nfs/bigbang/pratik18v/cse599/sst/data/', type=str)
+
+    p.add_argument('-m', '--mode', help='mode for which PCA is taking place [validation, test]',
+            default='test', type=str)
+
+    p.add_argument('-s', '--stride', help='Stride for densely sampling data', default=1, type=int)
+
+    p.add_argument('-sl', '--seq_len', help='Length of sequence of each data point', default=128, type=int)
+
+    p.add_argument('-fdim', '--feat_dim', help='Dimension of c3d feature dimension', default=500, type=int)
+
+    p.add_argument('-k', '--num_proposals', help='Number of proposals generated at each timestep',
+            default=32, type=int)
+
+    return p.parse_args()
+
+def perform_pca(args):
+
+    fnames = []
+    for fname in os.listdir(args.feats_dir):
+        if fname.split('_')[1] == args.mode:
+            fnames.append(args.feats_dir + fname)
+        elif fname.split('_')[1] == args.mode:
+            fnames.append(args.feats_dir + fname)
+
+    if os.path.exists(args.stats_data) == False:
+        #Computing PCA statistics
+        feats_concat = sio.loadmat(fnames[0])['relu6']
+
+        ctr = 0
+        for fname in fnames[1:]:
+            print ctr
+            ctr += 1
+            feats = sio.loadmat(fname)['relu6']
+            feats_concat = np.concatenate((feats_concat, feats), axis=0)
+
+        mean = np.mean(feats_concat, axis=0)
+        #Whitening
+        feats_concat = np.subtract(feats_concat, mean)
+
+        #PCA
+        pca = PCA(n_components=args.feat_dim, whiten=True)
+        pca.fit(feats_concat)
+        with open(args.stats_data,'w') as f:
+            pkl.dump([pca, mean], f)
+
+    else:
+        with open(args.stats_data, 'r') as f:
+            pca, mean = pkl.load(f)
+        print mean.shape
+
+    #Applying transformation
+    for fname in fnames:
+        feats = sio.loadmat(fname)['relu6']
+        feats = np.subtract(feats, mean)
+        feats_proj = pca.transform(feats)
+
+        if os.path.exists(args.data_dir + 'c3d_pca') == False:
+            os.mkdir(args.data_dir + 'c3d_pca')
+        sio.savemat(args.data_dir + 'c3d_pca/' + fname.split('/')[-1], {'relu6': feats_proj})
+
+def sample_data(args):
+
+    train_fnames = []
+    for fname in os.listdir(args.pca_feats_dir):
+        if fname.split('_')[1] == 'validation':
+            train_fnames.append(args.pca_feats_dir + fname)
+
+    #print len(set([tf.split('/')[-1].split('.')[0] for tf in train_fnames]))
+    gt_data = sio.loadmat(args.data_dir + 'val_ground_truths_k32.mat')['ground_truth'][0,0]
+
+    #Making directories to store train and val data
+    train_dir = 'train_stride_{}_seqlen_{}_k_{}'.format(args.stride, args.seq_len, args.num_proposals)
+    if os.path.exists(args.data_dir + train_dir) == False:
+        os.mkdir(args.data_dir + train_dir)
+    val_dir = 'val_stride_{}_seqlen_{}_k_{}'.format(args.stride, args.seq_len, args.num_proposals)
+    if os.path.exists(args.data_dir + val_dir) == False:
+        os.mkdir(args.data_dir + val_dir)
+
+    for fname in train_fnames:
+        if train_fnames.index(fname) <= 0.8 * len(train_fnames):
+            direc = train_dir
+            #print len(set([tf.split('/')[-1].split('_')[2] for tf in os.listdir(args.data_dir + direc)]))
+        else:
+            direc = val_dir
+            #print len(set([tf.split('/')[-1].split('_')[2] for tf in os.listdir(args.data_dir + direc)]))
+
+        vid_id = fname.split('/')[-1].split('.')[0]
+        feat = sio.loadmat(fname)['relu6']
+        gt = gt_data[vid_id]
+
+        if feat.shape[0] < gt.shape[0]:
+            gt = gt[:feat.shape[0],:]
+        elif feat.shape[0] > gt.shape[0]:
+            diff = feat.shape[0] - gt.shape[0]
+            endcol = gt[-1,:]
+            padding = np.tile(endcol, (diff,1))
+            gt = np.vstack((gt, padding))
+
+        assert feat.shape[0] == gt.shape[0]
+
+        #If time steps less than window length, replicate last time step
+        if feat.shape[0] < args.seq_len:
+            feat = np.vstack((feat, np.tile(feat[-1,:], (args.seq_len - feat.shape[0], 1))))
+            gt = np.vstack((gt, np.tile(gt[-1,:], (args.seq_len - gt.shape[0], 1))))
+
+        start_idx = 0
+        end_idx = start_idx + args.seq_len
+        ctr = 0
+        while end_idx <= feat.shape[0]:
+            save_path = args.data_dir + direc + '/' + vid_id + '_{}'.format(ctr)
+            sio.savemat(save_path, {'relu6':feat[start_idx:end_idx,:], 'label':gt[start_idx:end_idx,:]})
+            print 'Saved: {}'.format(save_path)
+            start_idx += args.stride
+            end_idx = start_idx + args.seq_len
+            ctr += 1
 
 def get_segments(y, delta=16):
     """Convert predicted output tensor (y_pred) from SST model into the
@@ -29,12 +169,11 @@ def get_segments(y, delta=16):
         One-dimensional array of shape (num_props,), containing the
         corresponding scores for each detection above.
     """
-    stride = 16
     temp_props, temp_scores = [], []
     L, K = y.shape
     for i in range(L):
         for j in range(min(i+1, K)):
-            temp_props.append([stride*(i-j-1), stride*i])
+            temp_props.append([delta*(i-j-1), delta*i])
             temp_scores.append(y[i, j])
     props_arr, score_arr = np.array(temp_props), np.array(temp_scores)
     # filter out proposals that extend beyond the start of the video.

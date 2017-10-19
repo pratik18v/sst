@@ -1,7 +1,7 @@
 # SST: Single-Stream Temporal Action Proposals
 
 
-Welcome to the official repo for [SST: Single-Stream Temporal Action Proposals](http://vision.stanford.edu/pdf/buch2017cvpr.pdf)!
+Pytorch implementation for the paper [SST: Single-Stream Temporal Action Proposals](http://vision.stanford.edu/pdf/buch2017cvpr.pdf)!
 
 **SST** is an efficient model for generating temporal action proposals in untrimmed videos. Analogous to object proposals for *images*, temporal action proposals provide the temporal bounds in *videos* where potential actions of interest may lie.
 
