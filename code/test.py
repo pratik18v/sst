@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import scipy.io as sio
 
-from pytorch_sst.model import SSTSequenceEncoder
+from sst.model import SSTSequenceEncoder
 from sst.utils import get_segments, nms_detections
 
 import torch
